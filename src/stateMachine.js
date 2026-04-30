@@ -60,36 +60,42 @@ export function checkWIPLimit(column, cards) {
 }
 
 // 检查是否可以移动卡片到目标列
+// 检查顺序：状态转换 → 依赖关系 → WIP 限制
+// 原因：如果卡片有未完成的依赖，它根本不应该被移动，无论 WIP 是否满
 export function canMoveCardToColumn(card, targetColumn, allCards, allColumns) {
   if (!card || !targetColumn) return { allowed: false, reason: '无效的卡片或目标列' };
   
-  // 检查状态转换是否有效
+  // 1. 检查状态转换是否有效
   if (!canTransition(card.status, targetColumn.status)) {
     return { 
       allowed: false, 
-      reason: `无法从"${getStatusDisplayName(card.status)}"直接移动到"${getStatusDisplayName(targetColumn.status)}"` 
+      reason: `无法从"${getStatusDisplayName(card.status)}"直接移动到"${getStatusDisplayName(targetColumn.status)}"`,
+      type: 'invalid_transition'
     };
   }
   
-  // 检查目标列的 WIP 限制
-  const columnCards = allCards.filter(c => c.status === targetColumn.status && c.id !== card.id);
-  if (columnCards.length >= targetColumn.wipLimit) {
-    return { 
-      allowed: false, 
-      reason: `目标列"${targetColumn.name}"已达到 WIP 上限 (${targetColumn.wipLimit})` 
-    };
-  }
-  
-  // 检查依赖关系
+  // 2. 检查依赖关系（先于 WIP 检查，因为依赖未完成时根本不应该考虑移动）
   const dependencyCheck = checkDependencies(card, allCards);
   if (!dependencyCheck.allowed) {
     return {
       allowed: false,
       reason: dependencyCheck.reason,
+      type: 'dependency_blocked',
+      blockingCards: dependencyCheck.blockingCards
     };
   }
   
-  return { allowed: true };
+  // 3. 检查目标列的 WIP 限制
+  const columnCards = allCards.filter(c => c.status === targetColumn.status && c.id !== card.id);
+  if (columnCards.length >= targetColumn.wipLimit) {
+    return { 
+      allowed: false, 
+      reason: `目标列"${targetColumn.name}"已达到 WIP 上限 (${targetColumn.wipLimit})`,
+      type: 'wip_exceeded'
+    };
+  }
+  
+  return { allowed: true, type: 'allowed' };
 }
 
 // 检查卡片的依赖关系
@@ -200,23 +206,28 @@ export function canAddDependency(cardId, targetDepId, allCards) {
 }
 
 // 获取可以作为当前卡片依赖的卡片列表
+// 统一返回格式，包含 isAvailable 和 unavailableReason 字段
 export function getAvailableDependencies(cardId, allCards) {
   if (!allCards || allCards.length === 0) return [];
   
-  // 如果是新卡片（没有 ID），所有其他卡片都是可用的
-  if (!cardId) {
-    return allCards;
-  }
-  
-  return allCards.filter(depCard => {
-    const result = canAddDependency(cardId, depCard.id, allCards);
-    return result.allowed;
-  }).map(depCard => {
+  return allCards.map(depCard => {
+    // 不能依赖自己
+    if (cardId && cardId === depCard.id) {
+      return {
+        ...depCard,
+        isAvailable: false,
+        unavailableReason: '不能依赖自己'
+      };
+    }
+    
+    // 对于新卡片（没有 ID），检查是否会与已选中的依赖形成问题
+    // 但新卡片不会被任何现有卡片依赖，所以不会形成循环
+    // 不过我们仍然使用统一的检查逻辑
     const result = canAddDependency(cardId, depCard.id, allCards);
     return {
       ...depCard,
       isAvailable: result.allowed,
-      unavailableReason: result.reason
+      unavailableReason: result.reason || null
     };
   });
 }

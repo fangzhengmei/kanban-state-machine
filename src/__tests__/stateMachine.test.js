@@ -10,7 +10,8 @@ import {
   getDependentCards,
   getAvailableColumnsForCard,
   checkCircularDependency,
-  canAddDependency
+  canAddDependency,
+  getAvailableDependencies
 } from '../stateMachine';
 import { CardStatus, Card, Column } from '../types';
 
@@ -755,6 +756,284 @@ describe('边界情况测试', () => {
       // 测试 3：依赖完成且 WIP 未满 → 应该允许
       result = canMoveCardToColumn(cardA, todoColumn, [cardA, cardBCompleted], columns);
       expect(result.allowed).toBe(true);
+    });
+  });
+});
+
+describe('移动校验顺序与提示语义测试', () => {
+  describe('检查顺序验证', () => {
+    it('应该优先检查依赖关系，再检查 WIP 限制', () => {
+      // 场景：卡片有未完成的依赖，同时目标列 WIP 已满
+      // 期望：应该返回依赖关系错误，而不是 WIP 错误
+      
+      const cardA = new Card({ 
+        id: 'a', 
+        title: '卡片A', 
+        status: CardStatus.BACKLOG,
+        dependencies: ['b']
+      });
+      
+      const cardB = new Card({ 
+        id: 'b', 
+        title: '卡片B', 
+        status: CardStatus.IN_PROGRESS  // 未完成
+      });
+      
+      const todoColumn = new Column({ 
+        id: 'col-todo', 
+        name: '待办', 
+        status: CardStatus.TODO, 
+        wipLimit: 0  // WIP 为 0，已满
+      });
+      
+      const columns = [todoColumn];
+      
+      const result = canMoveCardToColumn(cardA, todoColumn, [cardA, cardB], columns);
+      
+      // 应该优先返回依赖关系错误，而不是 WIP 错误
+      expect(result.allowed).toBe(false);
+      expect(result.type).toBe('dependency_blocked');
+      expect(result.reason).toContain('依赖卡片');
+      expect(result.reason).not.toContain('WIP');
+    });
+
+    it('当依赖关系通过后，应该检查 WIP 限制', () => {
+      // 场景：依赖已完成，但目标列 WIP 已满
+      
+      const cardA = new Card({ 
+        id: 'a', 
+        title: '卡片A', 
+        status: CardStatus.BACKLOG,
+        dependencies: ['b']
+      });
+      
+      const cardB = new Card({ 
+        id: 'b', 
+        title: '卡片B', 
+        status: CardStatus.DONE  // 已完成
+      });
+      
+      const todoColumn = new Column({ 
+        id: 'col-todo', 
+        name: '待办', 
+        status: CardStatus.TODO, 
+        wipLimit: 0  // WIP 为 0，已满
+      });
+      
+      const columns = [todoColumn];
+      
+      const result = canMoveCardToColumn(cardA, todoColumn, [cardA, cardB], columns);
+      
+      // 应该返回 WIP 错误
+      expect(result.allowed).toBe(false);
+      expect(result.type).toBe('wip_exceeded');
+      expect(result.reason).toContain('WIP 上限');
+    });
+  });
+
+  describe('提示语义与 type 字段', () => {
+    it('应该返回正确的 type 字段', () => {
+      const cardA = new Card({ 
+        id: 'a', 
+        title: '卡片A', 
+        status: CardStatus.BACKLOG
+      });
+      
+      const columns = [
+        new Column({ id: 'col-backlog', name: '待规划', status: CardStatus.BACKLOG, wipLimit: Infinity }),
+        new Column({ id: 'col-todo', name: '待办', status: CardStatus.TODO, wipLimit: 5 }),
+        new Column({ id: 'col-in-progress', name: '进行中', status: CardStatus.IN_PROGRESS, wipLimit: 3 }),
+      ];
+      
+      // 测试 1：无效的状态转换
+      let result = canMoveCardToColumn(cardA, columns[2], [cardA], columns);
+      expect(result.type).toBe('invalid_transition');
+      
+      // 测试 2：允许的移动
+      result = canMoveCardToColumn(cardA, columns[1], [cardA], columns);
+      expect(result.type).toBe('allowed');
+      expect(result.allowed).toBe(true);
+    });
+
+    it('依赖阻塞时应该返回 blockingCards', () => {
+      const cardA = new Card({ 
+        id: 'a', 
+        title: '卡片A', 
+        status: CardStatus.BACKLOG,
+        dependencies: ['b', 'c']
+      });
+      
+      const cardB = new Card({ 
+        id: 'b', 
+        title: '卡片B', 
+        status: CardStatus.IN_PROGRESS  // 未完成
+      });
+      
+      const cardC = new Card({ 
+        id: 'c', 
+        title: '卡片C', 
+        status: CardStatus.DONE  // 已完成
+      });
+      
+      const todoColumn = new Column({ 
+        id: 'col-todo', 
+        name: '待办', 
+        status: CardStatus.TODO, 
+        wipLimit: 5
+      });
+      
+      const result = canMoveCardToColumn(cardA, todoColumn, [cardA, cardB, cardC], [todoColumn]);
+      
+      expect(result.type).toBe('dependency_blocked');
+      expect(result.blockingCards).toBeDefined();
+      expect(result.blockingCards.length).toBe(1);
+      expect(result.blockingCards[0].id).toBe('b');
+    });
+  });
+});
+
+describe('getAvailableDependencies 测试', () => {
+  it('新建卡片时应该返回统一格式的结果', () => {
+    const cardA = new Card({ id: 'a', title: '卡片A', status: CardStatus.TODO });
+    const cardB = new Card({ id: 'b', title: '卡片B', status: CardStatus.TODO });
+    const allCards = [cardA, cardB];
+    
+    // 新建卡片（cardId 为 undefined）
+    const result = getAvailableDependencies(undefined, allCards);
+    
+    expect(result.length).toBe(2);
+    
+    // 每个结果都应该有 isAvailable 和 unavailableReason 字段
+    result.forEach(item => {
+      expect(item.isAvailable).toBeDefined();
+      expect(item.unavailableReason).toBeDefined();
+    });
+    
+    // 对于新建卡片，所有卡片都应该是可用的
+    result.forEach(item => {
+      expect(item.isAvailable).toBe(true);
+    });
+  });
+
+  it('编辑卡片时应该正确标记不可用的依赖', () => {
+    // 创建循环依赖：A 依赖 B，B 依赖 A
+    const cardA = new Card({ 
+      id: 'a', 
+      title: '卡片A', 
+      status: CardStatus.TODO,
+      dependencies: ['b']
+    });
+    const cardB = new Card({ 
+      id: 'b', 
+      title: '卡片B', 
+      status: CardStatus.TODO,
+      dependencies: ['a']
+    });
+    const cardC = new Card({ 
+      id: 'c', 
+      title: '卡片C', 
+      status: CardStatus.TODO
+    });
+    
+    const allCards = [cardA, cardB, cardC];
+    
+    // 编辑卡片 A，检查可用的依赖
+    const result = getAvailableDependencies('a', allCards);
+    
+    // 卡片 A 不能依赖自己
+    const itemA = result.find(r => r.id === 'a');
+    expect(itemA.isAvailable).toBe(false);
+    expect(itemA.unavailableReason).toContain('不能依赖自己');
+    
+    // 卡片 A 不能依赖 B（因为 B 依赖 A，形成循环）
+    const itemB = result.find(r => r.id === 'b');
+    expect(itemB.isAvailable).toBe(false);
+    expect(itemB.unavailableReason).toContain('循环依赖');
+    
+    // 卡片 A 可以依赖 C
+    const itemC = result.find(r => r.id === 'c');
+    expect(itemC.isAvailable).toBe(true);
+  });
+
+  it('应该正确处理空卡片列表', () => {
+    const result = getAvailableDependencies('a', []);
+    expect(result).toEqual([]);
+  });
+
+  it('应该正确处理 null 卡片列表', () => {
+    // @ts-ignore - 测试 null 情况
+    const result = getAvailableDependencies('a', null);
+    expect(result).toEqual([]);
+  });
+});
+
+describe('回归测试', () => {
+  describe('canAddDependency 边界情况', () => {
+    it('新建卡片时 canAddDependency 应该总是允许', () => {
+      const cardA = new Card({ id: 'a', title: '卡片A', status: CardStatus.TODO });
+      const cardB = new Card({ id: 'b', title: '卡片B', status: CardStatus.TODO, dependencies: ['a'] });
+      
+      // 新建卡片（cardId 为 undefined）想要依赖 B
+      // 即使 B 依赖 A，也应该允许，因为新卡片还没有被任何卡片依赖
+      const result = canAddDependency(undefined, 'b', [cardA, cardB]);
+      
+      expect(result.allowed).toBe(true);
+    });
+
+    it('应该正确检测已存在的依赖', () => {
+      const cardA = new Card({ 
+        id: 'a', 
+        title: '卡片A', 
+        status: CardStatus.TODO,
+        dependencies: ['b']
+      });
+      const cardB = new Card({ id: 'b', title: '卡片B', status: CardStatus.TODO });
+      
+      // 卡片 A 尝试再次依赖 B
+      const result = canAddDependency('a', 'b', [cardA, cardB]);
+      
+      expect(result.allowed).toBe(false);
+      expect(result.reason).toContain('已经存在此依赖');
+    });
+  });
+
+  describe('checkCircularDependency 边界情况', () => {
+    it('应该正确检测自身循环（卡片依赖自己）', () => {
+      const cardA = new Card({ 
+        id: 'a', 
+        title: '卡片A', 
+        status: CardStatus.TODO,
+        dependencies: ['a']  // 依赖自己
+      });
+      
+      // 检查从 a 出发能否到达 a
+      const result = checkCircularDependency('a', 'a', [cardA]);
+      
+      expect(result.hasCircular).toBe(true);
+    });
+
+    it('应该正确处理不存在的卡片', () => {
+      const cardA = new Card({ id: 'a', title: '卡片A', status: CardStatus.TODO });
+      
+      // 检查从不存在的卡片出发
+      const result = checkCircularDependency('nonexistent', 'a', [cardA]);
+      
+      expect(result.hasCircular).toBe(false);
+    });
+
+    it('应该正确处理目标卡片不存在的情况', () => {
+      const cardA = new Card({ 
+        id: 'a', 
+        title: '卡片A', 
+        status: CardStatus.TODO,
+        dependencies: ['b']
+      });
+      const cardB = new Card({ id: 'b', title: '卡片B', status: CardStatus.TODO });
+      
+      // 检查从 a 出发能否到达不存在的卡片
+      const result = checkCircularDependency('a', 'nonexistent', [cardA, cardB]);
+      
+      expect(result.hasCircular).toBe(false);
     });
   });
 });
