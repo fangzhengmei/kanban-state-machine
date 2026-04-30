@@ -127,6 +127,100 @@ export function getDependentCards(cardId, allCards) {
   return allCards.filter(card => card.dependencies && card.dependencies.includes(cardId));
 }
 
+// 检测循环依赖
+export function checkCircularDependency(cardId, targetDepId, allCards, visited = new Set()) {
+  // 如果已经访问过这个卡片，说明存在循环依赖
+  if (visited.has(cardId)) {
+    return { hasCircular: true, path: Array.from(visited).concat(cardId) };
+  }
+  
+  // 标记当前卡片为已访问
+  const newVisited = new Set(visited);
+  newVisited.add(cardId);
+  
+  // 查找当前卡片
+  const card = allCards.find(c => c.id === cardId);
+  if (!card || !card.dependencies || card.dependencies.length === 0) {
+    return { hasCircular: false };
+  }
+  
+  // 检查每个依赖
+  for (const depId of card.dependencies) {
+    // 如果依赖的卡片就是目标依赖卡片，说明存在直接循环
+    if (depId === targetDepId) {
+      return { hasCircular: true, path: Array.from(newVisited).concat(depId) };
+    }
+    
+    // 递归检查依赖的卡片
+    const result = checkCircularDependency(depId, targetDepId, allCards, newVisited);
+    if (result.hasCircular) {
+      return result;
+    }
+  }
+  
+  return { hasCircular: false };
+}
+
+// 检查是否可以将 targetDepId 添加为 cardId 的依赖（防止循环依赖）
+export function canAddDependency(cardId, targetDepId, allCards) {
+  // 不能依赖自己
+  if (cardId === targetDepId) {
+    return { 
+      allowed: false, 
+      reason: '不能依赖自己' 
+    };
+  }
+  
+  // 检查是否已存在依赖
+  const card = allCards.find(c => c.id === cardId);
+  if (card && card.dependencies && card.dependencies.includes(targetDepId)) {
+    return { 
+      allowed: false, 
+      reason: '已经存在此依赖' 
+    };
+  }
+  
+  // 检查循环依赖：如果我们让 cardId 依赖 targetDepId，是否会形成循环？
+  // 方法：检查从 targetDepId 出发，是否能到达 cardId
+  const circularResult = checkCircularDependency(targetDepId, cardId, allCards);
+  if (circularResult.hasCircular) {
+    // 获取循环路径中的卡片标题
+    const pathCards = circularResult.path.map(id => {
+      const c = allCards.find(card => card.id === id);
+      return c ? `"${c.title}"` : id;
+    });
+    return { 
+      allowed: false, 
+      reason: `检测到循环依赖: ${pathCards.join(' → ')}`,
+      circularPath: circularResult.path
+    };
+  }
+  
+  return { allowed: true };
+}
+
+// 获取可以作为当前卡片依赖的卡片列表
+export function getAvailableDependencies(cardId, allCards) {
+  if (!allCards || allCards.length === 0) return [];
+  
+  // 如果是新卡片（没有 ID），所有其他卡片都是可用的
+  if (!cardId) {
+    return allCards;
+  }
+  
+  return allCards.filter(depCard => {
+    const result = canAddDependency(cardId, depCard.id, allCards);
+    return result.allowed;
+  }).map(depCard => {
+    const result = canAddDependency(cardId, depCard.id, allCards);
+    return {
+      ...depCard,
+      isAvailable: result.allowed,
+      unavailableReason: result.reason
+    };
+  });
+}
+
 // 获取卡片可以移动到的列
 export function getAvailableColumnsForCard(card, allColumns, allCards) {
   if (!card || !allColumns) return [];

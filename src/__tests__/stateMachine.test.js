@@ -8,7 +8,9 @@ import {
   canMoveCardToColumn,
   checkDependencies,
   getDependentCards,
-  getAvailableColumnsForCard
+  getAvailableColumnsForCard,
+  checkCircularDependency,
+  canAddDependency
 } from '../stateMachine';
 import { CardStatus, Card, Column } from '../types';
 
@@ -427,6 +429,332 @@ describe('卡片移动测试', () => {
       // IN_PROGRESS 列：不是有效目标（状态转换不合法）
       const inProgressCol = availableColumns.find(c => c.id === 'col-in-progress');
       expect(inProgressCol.isValidTarget).toBe(false);
+    });
+  });
+});
+
+describe('循环依赖检测测试', () => {
+  describe('checkCircularDependency', () => {
+    it('应该检测直接循环依赖（A 依赖 B，B 依赖 A）', () => {
+      const cardA = new Card({ id: 'a', title: '卡片A', status: CardStatus.TODO, dependencies: ['b'] });
+      const cardB = new Card({ id: 'b', title: '卡片B', status: CardStatus.TODO, dependencies: ['a'] });
+      const allCards = [cardA, cardB];
+      
+      // 检查：如果让 A 依赖 B，是否会形成循环？
+      // 方法：检查从 B 出发，是否能到达 A
+      const result = checkCircularDependency('b', 'a', allCards);
+      expect(result.hasCircular).toBe(true);
+      expect(result.path).toEqual(expect.arrayContaining(['b', 'a']));
+    });
+
+    it('应该检测间接循环依赖（A→B→C→A）', () => {
+      const cardA = new Card({ id: 'a', title: '卡片A', status: CardStatus.TODO, dependencies: ['b'] });
+      const cardB = new Card({ id: 'b', title: '卡片B', status: CardStatus.TODO, dependencies: ['c'] });
+      const cardC = new Card({ id: 'c', title: '卡片C', status: CardStatus.TODO, dependencies: ['a'] });
+      const allCards = [cardA, cardB, cardC];
+      
+      // 检查：如果让 A 依赖 B，是否会形成循环？
+      const result = checkCircularDependency('b', 'a', allCards);
+      expect(result.hasCircular).toBe(true);
+    });
+
+    it('不应该检测非循环依赖', () => {
+      const cardA = new Card({ id: 'a', title: '卡片A', status: CardStatus.TODO, dependencies: ['b'] });
+      const cardB = new Card({ id: 'b', title: '卡片B', status: CardStatus.TODO, dependencies: ['c'] });
+      const cardC = new Card({ id: 'c', title: '卡片C', status: CardStatus.TODO, dependencies: [] });
+      const allCards = [cardA, cardB, cardC];
+      
+      // 检查：如果让 A 依赖 B，是否会形成循环？
+      // B 依赖 C，C 没有依赖，所以不会形成循环
+      const result = checkCircularDependency('b', 'a', allCards);
+      expect(result.hasCircular).toBe(false);
+    });
+
+    it('应该处理空依赖的情况', () => {
+      const cardA = new Card({ id: 'a', title: '卡片A', status: CardStatus.TODO, dependencies: [] });
+      const allCards = [cardA];
+      
+      const result = checkCircularDependency('a', 'b', allCards);
+      expect(result.hasCircular).toBe(false);
+    });
+
+    it('应该处理不存在的卡片', () => {
+      const cardA = new Card({ id: 'a', title: '卡片A', status: CardStatus.TODO, dependencies: ['nonexistent'] });
+      const allCards = [cardA];
+      
+      const result = checkCircularDependency('a', 'b', allCards);
+      expect(result.hasCircular).toBe(false);
+    });
+  });
+
+  describe('canAddDependency', () => {
+    it('不应该允许依赖自己', () => {
+      const cardA = new Card({ id: 'a', title: '卡片A', status: CardStatus.TODO });
+      const allCards = [cardA];
+      
+      const result = canAddDependency('a', 'a', allCards);
+      expect(result.allowed).toBe(false);
+      expect(result.reason).toContain('不能依赖自己');
+    });
+
+    it('不应该允许添加已存在的依赖', () => {
+      const cardA = new Card({ id: 'a', title: '卡片A', status: CardStatus.TODO, dependencies: ['b'] });
+      const cardB = new Card({ id: 'b', title: '卡片B', status: CardStatus.TODO });
+      const allCards = [cardA, cardB];
+      
+      const result = canAddDependency('a', 'b', allCards);
+      expect(result.allowed).toBe(false);
+      expect(result.reason).toContain('已经存在此依赖');
+    });
+
+    it('不应该允许会导致直接循环依赖的添加', () => {
+      const cardA = new Card({ id: 'a', title: '卡片A', status: CardStatus.TODO, dependencies: [] });
+      const cardB = new Card({ id: 'b', title: '卡片B', status: CardStatus.TODO, dependencies: ['a'] });
+      const allCards = [cardA, cardB];
+      
+      // 尝试让 A 依赖 B（已经 B 依赖 A，会形成循环）
+      const result = canAddDependency('a', 'b', allCards);
+      expect(result.allowed).toBe(false);
+      expect(result.reason).toContain('循环依赖');
+    });
+
+    it('不应该允许会导致间接循环依赖的添加', () => {
+      const cardA = new Card({ id: 'a', title: '卡片A', status: CardStatus.TODO, dependencies: [] });
+      const cardB = new Card({ id: 'b', title: '卡片B', status: CardStatus.TODO, dependencies: ['a'] });
+      const cardC = new Card({ id: 'c', title: '卡片C', status: CardStatus.TODO, dependencies: ['b'] });
+      const allCards = [cardA, cardB, cardC];
+      
+      // 尝试让 A 依赖 C（C→B→A，会形成循环）
+      const result = canAddDependency('a', 'c', allCards);
+      expect(result.allowed).toBe(false);
+      expect(result.reason).toContain('循环依赖');
+    });
+
+    it('应该允许正常的依赖添加', () => {
+      const cardA = new Card({ id: 'a', title: '卡片A', status: CardStatus.TODO, dependencies: [] });
+      const cardB = new Card({ id: 'b', title: '卡片B', status: CardStatus.DONE, dependencies: [] });
+      const allCards = [cardA, cardB];
+      
+      // 让 A 依赖 B（B 没有依赖，不会形成循环）
+      const result = canAddDependency('a', 'b', allCards);
+      expect(result.allowed).toBe(true);
+    });
+
+    it('应该允许新卡片（无 ID）依赖任何卡片', () => {
+      const cardA = new Card({ id: 'a', title: '卡片A', status: CardStatus.TODO, dependencies: ['b'] });
+      const cardB = new Card({ id: 'b', title: '卡片B', status: CardStatus.TODO, dependencies: ['a'] });
+      const allCards = [cardA, cardB];
+      
+      // 新卡片（null ID）应该可以依赖任何卡片，因为它还没有被其他卡片依赖
+      const result = canAddDependency(null, 'a', allCards);
+      expect(result.allowed).toBe(true);
+    });
+  });
+});
+
+describe('边界情况测试', () => {
+  describe('状态转换边界', () => {
+    it('DONE 状态不应该允许任何转换', () => {
+      const transitions = getValidTransitions(CardStatus.DONE);
+      expect(transitions).toEqual([]);
+    });
+
+    it('BACKLOG 应该只允许转换到 TODO', () => {
+      const transitions = getValidTransitions(CardStatus.BACKLOG);
+      expect(transitions).toEqual([CardStatus.TODO]);
+    });
+
+    it('TODO 应该允许转换到 IN_PROGRESS 或回退到 BACKLOG', () => {
+      const transitions = getValidTransitions(CardStatus.TODO);
+      expect(transitions).toContain(CardStatus.IN_PROGRESS);
+      expect(transitions).toContain(CardStatus.BACKLOG);
+      expect(transitions.length).toBe(2);
+    });
+
+    it('REVIEW 应该允许转换到 DONE 或回退到 IN_PROGRESS', () => {
+      const transitions = getValidTransitions(CardStatus.REVIEW);
+      expect(transitions).toContain(CardStatus.DONE);
+      expect(transitions).toContain(CardStatus.IN_PROGRESS);
+      expect(transitions.length).toBe(2);
+    });
+  });
+
+  describe('WIP 边界', () => {
+    it('WIP 为 0 时不应该允许任何卡片', () => {
+      const column = new Column({ 
+        id: 'col-test', 
+        name: '测试列', 
+        status: CardStatus.TODO, 
+        wipLimit: 0 
+      });
+      
+      const cards = [
+        new Card({ id: '1', title: '卡片1', status: CardStatus.BACKLOG }),
+      ];
+      
+      const result = checkWIPLimit(column, cards);
+      expect(result.allowed).toBe(false);
+      expect(result.currentCount).toBe(0);
+      expect(result.limit).toBe(0);
+    });
+
+    it('WIP 为 Infinity 时应该总是允许', () => {
+      const column = new Column({ 
+        id: 'col-test', 
+        name: '测试列', 
+        status: CardStatus.BACKLOG, 
+        wipLimit: Infinity 
+      });
+      
+      const cards = Array.from({ length: 100 }, (_, i) => 
+        new Card({ id: `card-${i}`, title: `卡片${i}`, status: CardStatus.BACKLOG })
+      );
+      
+      const result = checkWIPLimit(column, cards);
+      expect(result.allowed).toBe(true);
+      expect(result.currentCount).toBe(100);
+      expect(result.limit).toBe(Infinity);
+    });
+
+    it('卡片数等于 WIP 限制时应该不允许', () => {
+      const column = new Column({ 
+        id: 'col-test', 
+        name: '测试列', 
+        status: CardStatus.TODO, 
+        wipLimit: 2 
+      });
+      
+      const cards = [
+        new Card({ id: '1', title: '卡片1', status: CardStatus.TODO }),
+        new Card({ id: '2', title: '卡片2', status: CardStatus.TODO }),
+      ];
+      
+      const result = checkWIPLimit(column, cards);
+      expect(result.allowed).toBe(false);
+      expect(result.currentCount).toBe(2);
+      expect(result.limit).toBe(2);
+    });
+  });
+
+  describe('依赖关系边界', () => {
+    it('依赖已完成的卡片不应该阻塞', () => {
+      const depCard = new Card({ 
+        id: '2', 
+        title: '依赖卡片', 
+        status: CardStatus.DONE 
+      });
+      
+      const card = new Card({ 
+        id: '1', 
+        title: '测试卡片', 
+        dependencies: ['2'] 
+      });
+      
+      const result = checkDependencies(card, [depCard]);
+      expect(result.allowed).toBe(true);
+    });
+
+    it('依赖不存在的卡片应该忽略', () => {
+      const card = new Card({ 
+        id: '1', 
+        title: '测试卡片', 
+        dependencies: ['nonexistent'] 
+      });
+      
+      const result = checkDependencies(card, []);
+      expect(result.allowed).toBe(true);
+    });
+
+    it('多个依赖中部分完成部分未完成应该阻塞', () => {
+      const doneCard = new Card({ id: '2', title: '已完成', status: CardStatus.DONE });
+      const inProgressCard = new Card({ id: '3', title: '进行中', status: CardStatus.IN_PROGRESS });
+      
+      const card = new Card({ 
+        id: '1', 
+        title: '测试卡片', 
+        dependencies: ['2', '3'] 
+      });
+      
+      const result = checkDependencies(card, [doneCard, inProgressCard]);
+      expect(result.allowed).toBe(false);
+      expect(result.blockingCards).toEqual([inProgressCard]);
+    });
+
+    it('空依赖列表应该总是通过', () => {
+      const card = new Card({ 
+        id: '1', 
+        title: '测试卡片', 
+        dependencies: [] 
+      });
+      
+      const result = checkDependencies(card, []);
+      expect(result.allowed).toBe(true);
+    });
+
+    it('null 依赖列表应该总是通过', () => {
+      const card = {
+        id: '1',
+        title: '测试卡片',
+        status: CardStatus.TODO,
+        dependencies: null
+      };
+      
+      // @ts-ignore - 测试 null 依赖的情况
+      const result = checkDependencies(card, []);
+      expect(result.allowed).toBe(true);
+    });
+  });
+
+  describe('卡片移动综合测试', () => {
+    it('应该综合检查状态转换、WIP 限制和依赖关系', () => {
+      // 场景：卡片 A 依赖卡片 B，B 未完成
+      // 目标列 WIP 已满
+      // 状态转换合法
+      
+      const cardA = new Card({ 
+        id: 'a', 
+        title: '卡片A', 
+        status: CardStatus.BACKLOG,
+        dependencies: ['b']
+      });
+      
+      const cardB = new Card({ 
+        id: 'b', 
+        title: '卡片B', 
+        status: CardStatus.IN_PROGRESS  // 未完成
+      });
+      
+      const todoColumn = new Column({ 
+        id: 'col-todo', 
+        name: '待办', 
+        status: CardStatus.TODO, 
+        wipLimit: 1 
+      });
+      
+      const columns = [
+        new Column({ id: 'col-backlog', name: '待规划', status: CardStatus.BACKLOG, wipLimit: Infinity }),
+        todoColumn
+      ];
+      
+      // 目标列已有 1 个卡片（达到 WIP 上限）
+      const existingCards = [
+        new Card({ id: 'c', title: '现有卡片', status: CardStatus.TODO })
+      ];
+      
+      // 测试 1：依赖未完成 → 应该被拒绝
+      let result = canMoveCardToColumn(cardA, todoColumn, [cardA, cardB, ...existingCards], columns);
+      expect(result.allowed).toBe(false);
+      expect(result.reason).toContain('依赖卡片');
+      
+      // 测试 2：依赖完成，但 WIP 已满 → 应该被拒绝
+      const cardBCompleted = { ...cardB, status: CardStatus.DONE };
+      result = canMoveCardToColumn(cardA, todoColumn, [cardA, cardBCompleted, ...existingCards], columns);
+      expect(result.allowed).toBe(false);
+      expect(result.reason).toContain('WIP 上限');
+      
+      // 测试 3：依赖完成且 WIP 未满 → 应该允许
+      result = canMoveCardToColumn(cardA, todoColumn, [cardA, cardBCompleted], columns);
+      expect(result.allowed).toBe(true);
     });
   });
 });

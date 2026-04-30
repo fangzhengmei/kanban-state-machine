@@ -5,9 +5,11 @@ import {
   canMoveCardToColumn, 
   checkDependencies, 
   checkWIPLimit,
-  getStatusDisplayName,
+  getAvailableColumnsForCard,
   getValidTransitions,
-  isFinalStatus
+  getStatusDisplayName,
+  isFinalStatus,
+  canAddDependency
 } from './stateMachine';
 
 // 初始列配置
@@ -57,14 +59,20 @@ const initialCards = [
 function KanbanCard({ card, allCards, columns, onMove, onEdit, onDelete }) {
   const [showActions, setShowActions] = useState(false);
   
-  // 检查依赖关系
+  // 统一使用 getAvailableColumnsForCard 获取所有列的可用性信息
+  // 这个函数内部已经包含了：状态转换检查、WIP 限制检查、依赖关系检查
+  const allColumnsInfo = getAvailableColumnsForCard(card, columns, allCards);
+  
+  // 过滤出有效的目标列（状态转换合法的列）
+  const validTargetColumns = allColumnsInfo.filter(col => 
+    col.isValidTarget || 
+    (col.status !== card.status && getValidTransitions(card.status).includes(col.status))
+  );
+  
+  // 检查依赖关系（用于 UI 显示）
   const dependencyCheck = checkDependencies(card, allCards);
   
-  // 获取可以移动到的列
-  const validTransitions = getValidTransitions(card.status);
-  const availableColumns = columns.filter(col => validTransitions.includes(col.status));
-  
-  // 检查是否被阻塞
+  // 检查是否被阻塞（有未完成的依赖）
   const isBlocked = !dependencyCheck.allowed && card.dependencies.length > 0;
   
   // 获取阻塞的卡片
@@ -72,12 +80,9 @@ function KanbanCard({ card, allCards, columns, onMove, onEdit, onDelete }) {
 
   // 处理移动到下一个状态
   const handleMove = (targetStatus) => {
-    const targetColumn = columns.find(col => col.status === targetStatus);
-    if (targetColumn) {
-      const result = canMoveCardToColumn(card, targetColumn, allCards, columns);
-      if (result.allowed) {
-        onMove(card.id, targetStatus);
-      }
+    const targetColumn = allColumnsInfo.find(col => col.status === targetStatus);
+    if (targetColumn && targetColumn.isValidTarget) {
+      onMove(card.id, targetStatus);
     }
     setShowActions(false);
   };
@@ -107,27 +112,38 @@ function KanbanCard({ card, allCards, columns, onMove, onEdit, onDelete }) {
       
       {showActions && (
         <div className="card-actions">
-          {availableColumns.length > 0 && !isBlocked && (
+          {validTargetColumns.length > 0 && !isBlocked && (
             <select 
               className="form-select"
               style={{ fontSize: '12px', padding: '4px 8px' }}
               onChange={(e) => e.target.value && handleMove(e.target.value)}
               defaultValue=""
+              data-testid="move-select"
             >
               <option value="" disabled>移动到...</option>
-              {availableColumns.map(col => {
-                const wipCheck = checkWIPLimit(col, allCards.filter(c => c.id !== card.id));
-                return (
-                  <option 
-                    key={col.id} 
-                    value={col.status}
-                    disabled={!wipCheck.allowed}
-                  >
-                    {col.name} {!wipCheck.allowed && `(WIP已满)`}
-                  </option>
-                );
-              })}
+              {validTargetColumns.map(col => (
+                <option 
+                  key={col.id} 
+                  value={col.status}
+                  disabled={!col.isValidTarget}
+                >
+                  {col.name} {!col.isValidTarget && `(${col.invalidReason || '不可用'})`}
+                </option>
+              ))}
             </select>
+          )}
+          {validTargetColumns.length > 0 && isBlocked && (
+            <span 
+              style={{ 
+                fontSize: '12px', 
+                color: '#e74c3c',
+                padding: '4px 8px',
+                backgroundColor: '#ffebe6',
+                borderRadius: '4px'
+              }}
+            >
+              有依赖未完成
+            </span>
           )}
           <button className="btn-edit" onClick={() => onEdit(card)}>编辑</button>
           <button className="btn-delete" onClick={() => onDelete(card.id)}>删除</button>
@@ -182,7 +198,8 @@ function CardModal({
   allCards, 
   onSave, 
   onClose,
-  mode // 'create' or 'edit'
+  mode, // 'create' or 'edit'
+  defaultStatus = CardStatus.BACKLOG
 }) {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
@@ -194,31 +211,61 @@ function CardModal({
   React.useEffect(() => {
     if (isOpen) {
       if (card) {
+        // 编辑模式：使用卡片的当前状态
         setTitle(card.title || '');
         setDescription(card.description || '');
         setStatus(card.status || CardStatus.BACKLOG);
         setDependencies(card.dependencies || []);
       } else {
+        // 新建模式：使用传入的默认状态
         setTitle('');
         setDescription('');
-        setStatus(status);
+        setStatus(defaultStatus);
         setDependencies([]);
       }
       setError('');
     }
-  }, [isOpen, card, status]);
+  }, [isOpen, card, defaultStatus]);
 
-  // 获取可用的依赖卡片（排除当前卡片自己）
+  // 获取可用的依赖卡片（排除当前卡片自己，并检查循环依赖）
   const availableDependencies = useMemo(() => {
     if (!allCards) return [];
-    return allCards.filter(c => !card || c.id !== card.id);
-  }, [allCards, card]);
+    return allCards
+      .filter(c => !card || c.id !== card.id)
+      .map(depCard => {
+        // 对于已选中的依赖，总是显示为可用（因为已经通过检查）
+        // 对于未选中的依赖，检查是否可以添加
+        const isAlreadySelected = dependencies.includes(depCard.id);
+        if (isAlreadySelected) {
+          return { ...depCard, isAvailable: true, unavailableReason: null };
+        }
+        
+        // 检查是否可以添加此依赖
+        const result = canAddDependency(card?.id, depCard.id, allCards);
+        return {
+          ...depCard,
+          isAvailable: result.allowed,
+          unavailableReason: result.reason || null
+        };
+      });
+  }, [allCards, card, dependencies]);
 
   // 处理保存
   const handleSave = () => {
     if (!title.trim()) {
       setError('请输入卡片标题');
       return;
+    }
+
+    // 最终检查所有选中的依赖是否有效（防止并发修改）
+    if (card && dependencies.length > 0) {
+      for (const depId of dependencies) {
+        const result = canAddDependency(card.id, depId, allCards);
+        if (!result.allowed && !card.dependencies.includes(depId)) {
+          setError(result.reason || '依赖关系无效');
+          return;
+        }
+      }
     }
 
     onSave({
@@ -232,11 +279,22 @@ function CardModal({
 
   // 处理依赖选择
   const handleDependencyToggle = (depId) => {
+    const depCard = availableDependencies.find(d => d.id === depId);
+    if (!depCard) return;
+
     setDependencies(prev => {
       if (prev.includes(depId)) {
+        // 取消选择：总是允许
         return prev.filter(id => id !== depId);
       } else {
-        return [...prev, depId];
+        // 选择：检查是否可以添加
+        if (depCard.isAvailable) {
+          return [...prev, depId];
+        } else {
+          // 显示错误提示
+          setError(depCard.unavailableReason || '无法添加此依赖');
+          return prev;
+        }
       }
     });
   };
@@ -300,29 +358,61 @@ function CardModal({
               gap: '8px',
               padding: '8px 0'
             }}>
-              {availableDependencies.map(dep => (
-                <label 
-                  key={dep.id} 
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '4px',
-                    padding: '4px 8px',
-                    backgroundColor: dependencies.includes(dep.id) ? '#e3fcef' : '#f4f5f7',
-                    borderRadius: '4px',
-                    cursor: 'pointer',
-                    fontSize: '13px'
-                  }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={dependencies.includes(dep.id)}
-                    onChange={() => handleDependencyToggle(dep.id)}
-                  />
-                  {dep.title}
-                </label>
-              ))}
+              {availableDependencies.map(dep => {
+                const isSelected = dependencies.includes(dep.id);
+                const isDisabled = !dep.isAvailable && !isSelected;
+                
+                return (
+                  <label 
+                    key={dep.id} 
+                    title={dep.unavailableReason || ''}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '4px',
+                      padding: '4px 8px',
+                      backgroundColor: isSelected ? '#e3fcef' : isDisabled ? '#f0f0f0' : '#f4f5f7',
+                      borderRadius: '4px',
+                      cursor: isDisabled ? 'not-allowed' : 'pointer',
+                      fontSize: '13px',
+                      opacity: isDisabled ? 0.6 : 1
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      disabled={isDisabled}
+                      onChange={() => handleDependencyToggle(dep.id)}
+                      style={{
+                        cursor: isDisabled ? 'not-allowed' : 'pointer'
+                      }}
+                    />
+                    <span style={{
+                      color: isDisabled ? '#999' : 'inherit'
+                    }}>
+                      {dep.title}
+                    </span>
+                    {dep.unavailableReason && !isSelected && (
+                      <span 
+                        style={{
+                          fontSize: '10px',
+                          color: '#e74c3c',
+                          marginLeft: '4px'
+                        }}
+                        title={dep.unavailableReason}
+                      >
+                        ⚠
+                      </span>
+                    )}
+                  </label>
+                );
+              })}
             </div>
+            {availableDependencies.some(dep => !dep.isAvailable && !dependencies.includes(dep.id)) && (
+              <div className="warning-message" style={{ fontSize: '12px', marginTop: '8px' }}>
+                ⚠ 部分卡片不可选（可能导致循环依赖），悬停查看详情
+              </div>
+            )}
           </div>
         )}
 
@@ -367,7 +457,6 @@ function App() {
       const newCard = new Card({
         id: uuidv4(),
         ...cardData,
-        status: defaultStatus,
         createdAt: new Date(),
         updatedAt: new Date(),
       });
@@ -381,7 +470,7 @@ function App() {
     }
     setIsModalOpen(false);
     setEditingCard(null);
-  }, [modalMode, defaultStatus]);
+  }, [modalMode]);
 
   // 删除卡片
   const handleDeleteCard = useCallback((cardId) => {
@@ -437,6 +526,7 @@ function App() {
         onSave={handleSaveCard}
         onClose={() => setIsModalOpen(false)}
         mode={modalMode}
+        defaultStatus={defaultStatus}
       />
     </div>
   );
