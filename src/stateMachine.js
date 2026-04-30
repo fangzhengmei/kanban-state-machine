@@ -168,25 +168,41 @@ export function checkCircularDependency(cardId, targetDepId, allCards, visited =
 }
 
 // 检查是否可以将 targetDepId 添加为 cardId 的依赖（防止循环依赖）
+// 统一返回格式，包含 type 字段
 export function canAddDependency(cardId, targetDepId, allCards) {
-  // 不能依赖自己
+  // 新建场景下（cardId 为 undefined），不做任何检查
+  // 因为新卡片不会被任何现有卡片依赖，所以不会形成循环
+  if (!cardId) {
+    return { 
+      allowed: true, 
+      type: DependencyCheckType.VALID 
+    };
+  }
+
+  // 获取当前卡片
+  const card = allCards.find(c => c.id === cardId);
+  // 获取目标依赖卡片
+  const targetCard = allCards.find(c => c.id === targetDepId);
+  
+  // 1. 不能依赖自己
   if (cardId === targetDepId) {
     return { 
       allowed: false, 
-      reason: '不能依赖自己' 
+      reason: '不能依赖自己',
+      type: DependencyCheckType.SELF_DEPENDENCY
     };
   }
   
-  // 检查是否已存在依赖
-  const card = allCards.find(c => c.id === cardId);
+  // 2. 检查是否已存在依赖
   if (card && card.dependencies && card.dependencies.includes(targetDepId)) {
     return { 
       allowed: false, 
-      reason: '已经存在此依赖' 
+      reason: '已经存在此依赖',
+      type: DependencyCheckType.DUPLICATE_DEPENDENCY
     };
   }
   
-  // 检查循环依赖：如果我们让 cardId 依赖 targetDepId，是否会形成循环？
+  // 3. 检查循环依赖：如果我们让 cardId 依赖 targetDepId，是否会形成循环？
   // 方法：检查从 targetDepId 出发，是否能到达 cardId
   const circularResult = checkCircularDependency(targetDepId, cardId, allCards);
   if (circularResult.hasCircular) {
@@ -198,11 +214,15 @@ export function canAddDependency(cardId, targetDepId, allCards) {
     return { 
       allowed: false, 
       reason: `检测到循环依赖: ${pathCards.join(' → ')}`,
+      type: DependencyCheckType.CIRCULAR_DEPENDENCY,
       circularPath: circularResult.path
     };
   }
   
-  return { allowed: true };
+  return { 
+    allowed: true, 
+    type: DependencyCheckType.VALID 
+  };
 }
 
 // 依赖检查的类型枚举
@@ -368,7 +388,7 @@ export function validateDependencies(
 // 获取可以作为当前卡片依赖的卡片列表
 // 统一返回格式，包含 isAvailable 和 unavailableReason 字段
 // 检查优先级：
-// 1. 不能依赖自己（最高优先级，直接禁用）
+// 1. 不能依赖自己（最高优先级）
 // 2. 已存在依赖（编辑模式下）
 // 3. 会与现有卡片形成循环（编辑模式下）
 // 4. 依赖项本身存在循环（警告，但不禁用）
@@ -376,36 +396,21 @@ export function getAvailableDependencies(cardId, allCards) {
   if (!allCards || allCards.length === 0) return [];
   
   return allCards.map(depCard => {
-    // 1. 不能依赖自己（最高优先级）
-    if (cardId && cardId === depCard.id) {
-      return {
-        ...depCard,
-        isAvailable: false,
-        unavailableReason: '不能依赖自己',
-        checkType: DependencyCheckType.SELF_DEPENDENCY
-      };
-    }
-    
-    // 2. 使用 canAddDependency 检查是否已存在依赖或会形成循环
+    // 1. 使用 canAddDependency 统一检查所有场景
+    // 这个函数会处理：依赖自己、已存在依赖、循环依赖等
     const result = canAddDependency(cardId, depCard.id, allCards);
     
-    // 3. 检查依赖项本身是否存在循环（警告级别，不禁用）
+    // 2. 检查依赖项本身是否存在循环（警告级别，不禁用）
     const existingCircular = checkExistingCircular(depCard.id, allCards);
     
-    // 4. 检查依赖项是否有自己的依赖（用于提示用户）
+    // 3. 检查依赖项是否有自己的依赖（用于提示用户）
     const hasDependencies = depCard.dependencies && depCard.dependencies.length > 0;
     
     return {
       ...depCard,
       isAvailable: result.allowed,
       unavailableReason: result.reason || null,
-      checkType: !result.allowed 
-        ? (cardId && depCard.id === cardId 
-            ? DependencyCheckType.SELF_DEPENDENCY 
-            : (result.circularPath 
-                ? DependencyCheckType.CIRCULAR_DEPENDENCY 
-                : DependencyCheckType.DUPLICATE_DEPENDENCY))
-        : null,
+      checkType: result.type || null,
       hasDependencies,
       existingCircular: existingCircular.hasCircular ? {
         hasCircular: true,
