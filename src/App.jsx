@@ -9,7 +9,8 @@ import {
   getValidTransitions,
   getStatusDisplayName,
   isFinalStatus,
-  canAddDependency
+  canAddDependency,
+  validateDependencies
 } from './stateMachine';
 
 // 初始列配置
@@ -257,15 +258,25 @@ function CardModal({
       return;
     }
 
-    // 最终检查所有选中的依赖是否有效（防止并发修改）
-    if (card && dependencies.length > 0) {
-      for (const depId of dependencies) {
-        const result = canAddDependency(card.id, depId, allCards);
-        if (!result.allowed && !card.dependencies.includes(depId)) {
-          setError(result.reason || '依赖关系无效');
-          return;
-        }
-      }
+    // 使用统一的依赖验证函数
+    // 适用于新建模式和编辑模式
+    const validationResult = validateDependencies(
+      card?.id, // 新建模式下为 undefined
+      dependencies,
+      allCards
+    );
+
+    // 如果验证不通过，显示错误
+    if (!validationResult.allowed) {
+      setError(validationResult.reason || '依赖关系无效');
+      return;
+    }
+
+    // 如果有警告（例如依赖项本身存在循环），可以显示警告但继续保存
+    if (validationResult.isWarning && validationResult.warning) {
+      // 这里可以选择显示警告后继续，或者要求用户确认
+      // 为了简单起见，我们先显示警告，但仍然允许保存
+      console.warn(validationResult.warning);
     }
 
     onSave({

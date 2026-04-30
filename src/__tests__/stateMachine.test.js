@@ -11,7 +11,11 @@ import {
   getAvailableColumnsForCard,
   checkCircularDependency,
   canAddDependency,
-  getAvailableDependencies
+  getAvailableDependencies,
+  validateDependencies,
+  checkMultiDependencyCircular,
+  checkExistingCircular,
+  DependencyCheckType
 } from '../stateMachine';
 import { CardStatus, Card, Column } from '../types';
 
@@ -1034,6 +1038,346 @@ describe('回归测试', () => {
       const result = checkCircularDependency('a', 'nonexistent', [cardA, cardB]);
       
       expect(result.hasCircular).toBe(false);
+    });
+  });
+});
+
+describe('统一依赖规则测试', () => {
+  describe('DependencyCheckType 枚举', () => {
+    it('应该定义所有依赖检查类型', () => {
+      expect(DependencyCheckType.SELF_DEPENDENCY).toBe('self_dependency');
+      expect(DependencyCheckType.DUPLICATE_DEPENDENCY).toBe('duplicate_dependency');
+      expect(DependencyCheckType.CIRCULAR_DEPENDENCY).toBe('circular_dependency');
+      expect(DependencyCheckType.EXISTING_CIRCULAR).toBe('existing_circular');
+      expect(DependencyCheckType.VALID).toBe('valid');
+    });
+  });
+
+  describe('checkMultiDependencyCircular', () => {
+    it('应该检测选中的依赖项之间存在循环', () => {
+      // 场景：用户选择 A 和 B 作为依赖，但 A 依赖 B，B 依赖 A
+      const cardA = new Card({ 
+        id: 'a', 
+        title: '卡片A', 
+        status: CardStatus.TODO,
+        dependencies: ['b']
+      });
+      const cardB = new Card({ 
+        id: 'b', 
+        title: '卡片B', 
+        status: CardStatus.TODO,
+        dependencies: ['a']
+      });
+      const cardC = new Card({ 
+        id: 'c', 
+        title: '卡片C', 
+        status: CardStatus.TODO
+      });
+      
+      // 用户选择 A、B、C 作为依赖
+      const result = checkMultiDependencyCircular(['a', 'b', 'c'], [cardA, cardB, cardC]);
+      
+      expect(result.hasCircular).toBe(true);
+      expect(result.type).toBe(DependencyCheckType.CIRCULAR_DEPENDENCY);
+      expect(result.reason).toContain('选中的依赖项之间存在循环');
+    });
+
+    it('不应该检测非循环的依赖项', () => {
+      const cardA = new Card({ 
+        id: 'a', 
+        title: '卡片A', 
+        status: CardStatus.TODO,
+        dependencies: ['b']
+      });
+      const cardB = new Card({ 
+        id: 'b', 
+        title: '卡片B', 
+        status: CardStatus.TODO,
+        dependencies: ['c']
+      });
+      const cardC = new Card({ 
+        id: 'c', 
+        title: '卡片C', 
+        status: CardStatus.TODO
+      });
+      
+      // 用户选择 A、B、C 作为依赖（A→B→C，没有循环）
+      const result = checkMultiDependencyCircular(['a', 'b', 'c'], [cardA, cardB, cardC]);
+      
+      expect(result.hasCircular).toBe(false);
+    });
+
+    it('单依赖或无依赖时应该总是通过', () => {
+      const cardA = new Card({ id: 'a', title: '卡片A', status: CardStatus.TODO });
+      
+      // 无依赖
+      let result = checkMultiDependencyCircular([], [cardA]);
+      expect(result.hasCircular).toBe(false);
+      
+      // null 或 undefined
+      result = checkMultiDependencyCircular(null, [cardA]);
+      expect(result.hasCircular).toBe(false);
+      
+      // 单依赖
+      result = checkMultiDependencyCircular(['a'], [cardA]);
+      expect(result.hasCircular).toBe(false);
+    });
+  });
+
+  describe('checkExistingCircular', () => {
+    it('应该检测依赖项本身存在循环', () => {
+      // 场景：用户选择 B 作为依赖，但 B 已经和 C 形成循环
+      const cardB = new Card({ 
+        id: 'b', 
+        title: '卡片B', 
+        status: CardStatus.TODO,
+        dependencies: ['c']
+      });
+      const cardC = new Card({ 
+        id: 'c', 
+        title: '卡片C', 
+        status: CardStatus.TODO,
+        dependencies: ['b']
+      });
+      
+      const result = checkExistingCircular('b', [cardB, cardC]);
+      
+      expect(result.hasCircular).toBe(true);
+      expect(result.type).toBe(DependencyCheckType.EXISTING_CIRCULAR);
+      expect(result.reason).toContain('本身存在循环依赖');
+    });
+
+    it('不应该检测不存在循环的依赖项', () => {
+      const cardA = new Card({ 
+        id: 'a', 
+        title: '卡片A', 
+        status: CardStatus.TODO,
+        dependencies: ['b']
+      });
+      const cardB = new Card({ 
+        id: 'b', 
+        title: '卡片B', 
+        status: CardStatus.TODO
+      });
+      
+      const result = checkExistingCircular('a', [cardA, cardB]);
+      
+      expect(result.hasCircular).toBe(false);
+    });
+
+    it('应该正确处理不存在的卡片', () => {
+      const cardA = new Card({ id: 'a', title: '卡片A', status: CardStatus.TODO });
+      
+      const result = checkExistingCircular('nonexistent', [cardA]);
+      
+      expect(result.hasCircular).toBe(false);
+    });
+  });
+
+  describe('validateDependencies - 统一验证函数', () => {
+    describe('检查优先级验证', () => {
+      it('应该优先检测依赖自己（最高优先级）', () => {
+        const cardA = new Card({ id: 'a', title: '卡片A', status: CardStatus.TODO });
+        
+        // 场景：用户选择自己作为依赖
+        const result = validateDependencies('a', ['a', 'b', 'c'], [cardA]);
+        
+        expect(result.allowed).toBe(false);
+        expect(result.type).toBe(DependencyCheckType.SELF_DEPENDENCY);
+        expect(result.reason).toContain('不能依赖自己');
+      });
+
+      it('应该其次检测重复依赖', () => {
+        const cardA = new Card({ id: 'a', title: '卡片A', status: CardStatus.TODO });
+        const cardB = new Card({ id: 'b', title: '卡片B', status: CardStatus.TODO });
+        
+        // 场景：用户重复选择 B 作为依赖
+        const result = validateDependencies('a', ['b', 'b'], [cardA, cardB]);
+        
+        expect(result.allowed).toBe(false);
+        expect(result.type).toBe(DependencyCheckType.DUPLICATE_DEPENDENCY);
+        expect(result.reason).toContain('存在重复依赖');
+      });
+
+      it('应该然后检测选中依赖项之间的循环', () => {
+        const cardA = new Card({ id: 'a', title: '卡片A', status: CardStatus.TODO });
+        const cardB = new Card({ id: 'b', title: '卡片B', status: CardStatus.TODO, dependencies: ['c'] });
+        const cardC = new Card({ id: 'c', title: '卡片C', status: CardStatus.TODO, dependencies: ['b'] });
+        
+        // 场景：用户选择 B 和 C 作为依赖（B 和 C 之间有循环）
+        const result = validateDependencies('a', ['b', 'c'], [cardA, cardB, cardC]);
+        
+        expect(result.allowed).toBe(false);
+        expect(result.type).toBe(DependencyCheckType.CIRCULAR_DEPENDENCY);
+        expect(result.reason).toContain('选中的依赖项之间存在循环');
+      });
+
+      it('应该最后检测与现有卡片的循环（编辑模式）', () => {
+        // 场景：卡片 B 依赖卡片 A
+        // 用户尝试让卡片 A 依赖卡片 B（形成循环）
+        const cardA = new Card({ id: 'a', title: '卡片A', status: CardStatus.TODO });
+        const cardB = new Card({ id: 'b', title: '卡片B', status: CardStatus.TODO, dependencies: ['a'] });
+        
+        // 编辑模式：用户尝试让 A 依赖 B
+        const result = validateDependencies('a', ['b'], [cardA, cardB]);
+        
+        expect(result.allowed).toBe(false);
+        expect(result.reason).toContain('循环依赖');
+      });
+    });
+
+    describe('新建场景 vs 编辑场景', () => {
+      it('新建场景下不检测与现有卡片的循环', () => {
+        // 场景：卡片 B 依赖卡片 A
+        // 用户新建卡片时选择 B 作为依赖
+        // 这是允许的，因为新卡片还没有被任何卡片依赖
+        
+        const cardA = new Card({ id: 'a', title: '卡片A', status: CardStatus.TODO });
+        const cardB = new Card({ id: 'b', title: '卡片B', status: CardStatus.TODO, dependencies: ['a'] });
+        
+        // 新建模式（cardId 为 undefined）
+        const result = validateDependencies(undefined, ['b'], [cardA, cardB]);
+        
+        expect(result.allowed).toBe(true);
+        expect(result.type).toBe(DependencyCheckType.VALID);
+      });
+
+      it('编辑场景下检测与现有卡片的循环', () => {
+        const cardA = new Card({ id: 'a', title: '卡片A', status: CardStatus.TODO });
+        const cardB = new Card({ id: 'b', title: '卡片B', status: CardStatus.TODO, dependencies: ['a'] });
+        
+        // 编辑模式：用户尝试让 A 依赖 B
+        const result = validateDependencies('a', ['b'], [cardA, cardB]);
+        
+        expect(result.allowed).toBe(false);
+      });
+    });
+
+    describe('边界情况', () => {
+      it('空依赖列表应该总是通过', () => {
+        const cardA = new Card({ id: 'a', title: '卡片A', status: CardStatus.TODO });
+        
+        // 编辑模式，空依赖
+        let result = validateDependencies('a', [], [cardA]);
+        expect(result.allowed).toBe(true);
+        expect(result.type).toBe(DependencyCheckType.VALID);
+        
+        // 新建模式，空依赖
+        result = validateDependencies(undefined, [], [cardA]);
+        expect(result.allowed).toBe(true);
+        expect(result.type).toBe(DependencyCheckType.VALID);
+      });
+
+      it('null 依赖列表应该总是通过', () => {
+        const cardA = new Card({ id: 'a', title: '卡片A', status: CardStatus.TODO });
+        
+        // @ts-ignore - 测试 null 情况
+        const result = validateDependencies('a', null, [cardA]);
+        expect(result.allowed).toBe(true);
+      });
+
+      it('应该检测已存在的依赖（编辑模式）', () => {
+        const cardA = new Card({ 
+          id: 'a', 
+          title: '卡片A', 
+          status: CardStatus.TODO,
+          dependencies: ['b']  // 已经依赖 B
+        });
+        const cardB = new Card({ id: 'b', title: '卡片B', status: CardStatus.TODO });
+        
+        // 用户尝试再次添加 B 作为依赖
+        const result = validateDependencies('a', ['b'], [cardA, cardB]);
+        
+        expect(result.allowed).toBe(false);
+        expect(result.reason).toContain('已经存在此依赖');
+      });
+    });
+
+    describe('警告检测（依赖项本身存在循环）', () => {
+      it('应该检测依赖项本身存在循环并返回警告', () => {
+        // 场景：用户选择 B 作为依赖，但 B 已经和 C 形成循环
+        // 这是警告级别，不是错误级别
+        const cardA = new Card({ id: 'a', title: '卡片A', status: CardStatus.TODO });
+        const cardB = new Card({ 
+          id: 'b', 
+          title: '卡片B', 
+          status: CardStatus.TODO,
+          dependencies: ['c']
+        });
+        const cardC = new Card({ 
+          id: 'c', 
+          title: '卡片C', 
+          status: CardStatus.TODO,
+          dependencies: ['b']
+        });
+        
+        const result = validateDependencies('a', ['b'], [cardA, cardB, cardC]);
+        
+        // 应该允许，但有警告
+        expect(result.allowed).toBe(true);
+        expect(result.isWarning).toBe(true);
+        expect(result.type).toBe(DependencyCheckType.EXISTING_CIRCULAR);
+        expect(result.warning).toContain('本身存在循环依赖');
+      });
+    });
+  });
+
+  describe('提示文案一致性', () => {
+    it('依赖自己的提示文案应该一致', () => {
+      const cardA = new Card({ id: 'a', title: '卡片A', status: CardStatus.TODO });
+      
+      // 从 getAvailableDependencies 获取
+      const availableDeps = getAvailableDependencies('a', [cardA]);
+      const selfCard = availableDeps.find(d => d.id === 'a');
+      
+      // 从 validateDependencies 获取
+      const validateResult = validateDependencies('a', ['a'], [cardA]);
+      
+      // 两者的提示文案应该一致
+      expect(selfCard.unavailableReason).toContain('不能依赖自己');
+      expect(validateResult.reason).toContain('不能依赖自己');
+    });
+
+    it('已存在依赖的提示文案应该一致', () => {
+      const cardA = new Card({ 
+        id: 'a', 
+        title: '卡片A', 
+        status: CardStatus.TODO,
+        dependencies: ['b']
+      });
+      const cardB = new Card({ id: 'b', title: '卡片B', status: CardStatus.TODO });
+      
+      // 从 canAddDependency 获取
+      const addResult = canAddDependency('a', 'b', [cardA, cardB]);
+      
+      // 从 validateDependencies 获取
+      const validateResult = validateDependencies('a', ['b'], [cardA, cardB]);
+      
+      // 两者的提示文案应该一致
+      expect(addResult.reason).toContain('已经存在此依赖');
+      expect(validateResult.reason).toContain('已经存在此依赖');
+    });
+
+    it('循环依赖的提示文案应该包含路径', () => {
+      const cardA = new Card({ 
+        id: 'a', 
+        title: '卡片A', 
+        status: CardStatus.TODO,
+        dependencies: ['b']
+      });
+      const cardB = new Card({ 
+        id: 'b', 
+        title: '卡片B', 
+        status: CardStatus.TODO,
+        dependencies: ['a']
+      });
+      
+      const result = validateDependencies('a', ['b'], [cardA, cardB]);
+      
+      // 应该包含卡片标题的循环路径
+      expect(result.reason).toContain('循环依赖');
+      expect(result.reason).toContain('卡片A');
+      expect(result.reason).toContain('卡片B');
     });
   });
 });
